@@ -364,6 +364,11 @@ func (pc *partitionConsumer) Seek(msgID trackingMessageID) error {
 
 	// wait for the request to complete
 	<-req.doneCh
+	var backoff internal.Backoff
+	for pc.getConsumerState() != consumerReady {
+		d := backoff.Next()
+		time.Sleep(d)
+	}
 	return req.err
 }
 
