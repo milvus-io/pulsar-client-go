@@ -45,6 +45,7 @@ const (
 	consumerReady
 	consumerClosing
 	consumerClosed
+	consumerUnsubscribed
 )
 
 func (s consumerState) String() string {
@@ -254,7 +255,7 @@ func (pc *partitionConsumer) internalUnsubscribe(unsub *unsubscribeRequest) {
 		pc.nackTracker.Close()
 	}
 	pc.log.Infof("The consumer[%d] successfully unsubscribed", pc.consumerID)
-	pc.setConsumerState(consumerClosed)
+	pc.setConsumerState(consumerUnsubscribed)
 }
 
 func (pc *partitionConsumer) getLastMessageID() (trackingMessageID, error) {
@@ -344,7 +345,8 @@ func (pc *partitionConsumer) setConsumerState(state consumerState) {
 
 func (pc *partitionConsumer) Close() {
 
-	if pc.getConsumerState() != consumerReady {
+	if pc.getConsumerState() != consumerReady && pc.getConsumerState() != consumerUnsubscribed {
+		pc.log.Info("Close skip due to not ready")
 		return
 	}
 
@@ -364,10 +366,30 @@ func (pc *partitionConsumer) Seek(msgID trackingMessageID) error {
 
 	// wait for the request to complete
 	<-req.doneCh
+
+	// wait for conumer back to ready state
 	var backoff internal.Backoff
-	for pc.getConsumerState() != consumerReady {
+	var maxRetry int
+	if pc.options.maxReconnectToBroker == nil {
+		// -1 means always wait
+		maxRetry = -1
+	} else {
+		maxRetry = int(*pc.options.maxReconnectToBroker)
+	}
+	pc.log.Info("wait consumer ready max retry", maxRetry)
+
+	for maxRetry != 0 {
+		if maxRetry > 0 {
+			maxRetry--
+		}
 		d := backoff.Next()
 		time.Sleep(d)
+		if pc.getConsumerState() == consumerReady {
+			break
+		}
+	}
+	if pc.getConsumerState() != consumerReady {
+		return newError(ConnectError, "failed to wait consumer to ready")
 	}
 	return req.err
 }
@@ -825,7 +847,7 @@ func (pc *partitionConsumer) runEventsLoop() {
 func (pc *partitionConsumer) internalClose(req *closeRequest) {
 	defer close(req.doneCh)
 	state := pc.getConsumerState()
-	if state != consumerReady {
+	if state != consumerReady && state != consumerUnsubscribed {
 		// this might be redundant but to ensure nack tracker is closed
 		if pc.nackTracker != nil {
 			pc.nackTracker.Close()
