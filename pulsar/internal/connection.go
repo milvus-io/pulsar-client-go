@@ -79,6 +79,7 @@ type Connection interface {
 	ID() string
 	GetMaxMessageSize() int32
 	Close()
+	Cnt() int64
 }
 
 type ConsumerHandler interface {
@@ -125,7 +126,10 @@ type incomingCmd struct {
 	headersAndPayload Buffer
 }
 
+var counter int64
+
 type connection struct {
+	cnt int64
 	sync.Mutex
 	cond              *sync.Cond
 	started           int32
@@ -182,7 +186,9 @@ type connectionOptions struct {
 }
 
 func newConnection(opts connectionOptions) *connection {
+	cnt := atomic.AddInt64(&counter, 1)
 	cnx := &connection{
+		cnt:                  cnt,
 		connectionTimeout:    opts.connectionTimeout,
 		logicalAddr:          opts.logicalAddr,
 		physicalAddr:         opts.physicalAddr,
@@ -235,6 +241,8 @@ func (c *connection) start() {
 		}
 	}()
 }
+
+func (c *connection) Cnt() int64 { return c.cnt }
 
 func (c *connection) connect() bool {
 	c.log.Info("Connecting to broker")
@@ -455,10 +463,10 @@ func (c *connection) WriteData(data Buffer) {
 			// The channel is either:
 			// 1. blocked, in which case we need to wait until we have space
 			// 2. the connection is already closed, then we need to bail out
-			c.log.Debug("Couldn't write on connection channel immediately")
+			c.log.Info("Couldn't write on connection channel immediately", c.cnt)
 			state := c.getState()
 			if state != connectionReady {
-				c.log.Debug("Connection was already closed")
+				c.log.Info("Connection was already closed", c.cnt)
 				return
 			}
 		}
@@ -467,7 +475,7 @@ func (c *connection) WriteData(data Buffer) {
 }
 
 func (c *connection) internalWriteData(data Buffer) {
-	c.log.Debug("Write data: ", data.ReadableBytes())
+	c.log.Info("Write data: ", data.ReadableBytes())
 	if _, err := c.cnx.Write(data.ReadableSlice()); err != nil {
 		c.log.WithError(err).Warn("Failed to write on connection")
 		c.Close()
@@ -828,6 +836,7 @@ func (c *connection) UnregisterListener(id uint64) {
 // This also triggers callbacks to the ConnectionClosed listeners.
 func (c *connection) Close() {
 	c.closeOnce.Do(func() {
+		c.log.Info("connection closed", c.cnt)
 		c.Lock()
 		cnx := c.cnx
 		// do not use changeState() since they share the same lock

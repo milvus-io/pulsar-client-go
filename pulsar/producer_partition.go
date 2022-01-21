@@ -230,7 +230,7 @@ func (p *partitionProducer) grabCnx() error {
 	}
 	p.cnx = res.Cnx
 	p.cnx.RegisterListener(p.producerID, p)
-	p.log.WithField("cnx", res.Cnx.ID()).Debug("Connected producer")
+	p.log.WithField("cnx", res.Cnx.ID()).Info("Connected producer", p.cnx.Cnt())
 
 	pendingItems := p.pendingQueue.ReadableSlice()
 	viewSize := len(pendingItems)
