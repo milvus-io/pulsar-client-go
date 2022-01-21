@@ -45,6 +45,7 @@ const (
 	consumerReady
 	consumerClosing
 	consumerClosed
+	consumerUnsubscribed
 )
 
 func (s consumerState) String() string {
@@ -132,6 +133,7 @@ type partitionConsumer struct {
 	closeCh              chan struct{}
 	clearQueueCh         chan func(id trackingMessageID)
 	clearMessageQueuesCh chan chan struct{}
+	reconnectCh          chan error
 
 	nackTracker *negativeAcksTracker
 	dlq         *dlqRouter
@@ -254,7 +256,7 @@ func (pc *partitionConsumer) internalUnsubscribe(unsub *unsubscribeRequest) {
 		pc.nackTracker.Close()
 	}
 	pc.log.Infof("The consumer[%d] successfully unsubscribed", pc.consumerID)
-	pc.setConsumerState(consumerClosed)
+	pc.setConsumerState(consumerUnsubscribed)
 }
 
 func (pc *partitionConsumer) getLastMessageID() (trackingMessageID, error) {
@@ -344,7 +346,8 @@ func (pc *partitionConsumer) setConsumerState(state consumerState) {
 
 func (pc *partitionConsumer) Close() {
 
-	if pc.getConsumerState() != consumerReady {
+	if pc.getConsumerState() != consumerReady && pc.getConsumerState() != consumerUnsubscribed {
+		pc.log.Info("Close skip due to not ready")
 		return
 	}
 
@@ -360,16 +363,25 @@ func (pc *partitionConsumer) Seek(msgID trackingMessageID) error {
 		doneCh: make(chan struct{}),
 		msgID:  msgID,
 	}
+	// it safe to change channel value here, since only one event is processed
+	pc.reconnectCh = make(chan error, 1)
 	pc.eventsCh <- req
 
 	// wait for the request to complete
 	<-req.doneCh
-	var backoff internal.Backoff
-	for pc.getConsumerState() != consumerReady {
-		d := backoff.Next()
-		time.Sleep(d)
+
+	// shall not wait, since req got error
+	if req.err != nil {
+		return req.err
 	}
-	return req.err
+
+	// wait for reconnect to broker signal
+	err := <-pc.reconnectCh
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (pc *partitionConsumer) internalSeek(seek *seekRequest) {
@@ -825,7 +837,7 @@ func (pc *partitionConsumer) runEventsLoop() {
 func (pc *partitionConsumer) internalClose(req *closeRequest) {
 	defer close(req.doneCh)
 	state := pc.getConsumerState()
-	if state != consumerReady {
+	if state != consumerReady && state != consumerUnsubscribed {
 		// this might be redundant but to ensure nack tracker is closed
 		if pc.nackTracker != nil {
 			pc.nackTracker.Close()
@@ -896,12 +908,24 @@ func (pc *partitionConsumer) reconnectToBroker() {
 		if err == nil {
 			// Successfully reconnected
 			pc.log.Info("Reconnected consumer to broker")
+			// Notify any wait seek request
+			select {
+			case pc.reconnectCh <- nil:
+				// send signal to seek request
+			default:
+				// no waiting seek
+			}
 			return
 		}
 
 		if maxRetry > 0 {
 			maxRetry--
 		}
+	}
+	// try to notify waiting seek max retry exceeded
+	select {
+	case pc.reconnectCh <- newError(ConnectError, "reconnect to broker failed"):
+	default:
 	}
 }
 
