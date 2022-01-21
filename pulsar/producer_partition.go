@@ -229,7 +229,9 @@ func (p *partitionProducer) grabCnx() error {
 		p.sequenceIDGenerator = &nextSequenceID
 	}
 	p.cnx = res.Cnx
-	p.cnx.RegisterListener(p.producerID, p)
+	if err := p.cnx.RegisterListener(p.producerID, p); err != nil {
+		p.ConnectionClosed()
+	}
 	p.log.WithField("cnx", res.Cnx.ID()).Debug("Connected producer")
 
 	pendingItems := p.pendingQueue.ReadableSlice()
