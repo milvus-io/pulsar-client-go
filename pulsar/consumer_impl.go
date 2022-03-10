@@ -548,6 +548,11 @@ func (c *consumer) SeekByTime(time time.Time) error {
 	return c.consumers[0].SeekByTime(time)
 }
 
+func (c *consumer) GetLastMessageID(topicName string, partitionId int64) (MessageID, error) {
+	msg, err := c.consumers[partitionId].getLastMessageID()
+	return msg.messageID, err
+}
+
 var r = &random{
 	R: rand.New(rand.NewSource(time.Now().UnixNano())),
 }
