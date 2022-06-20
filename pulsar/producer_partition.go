@@ -231,6 +231,7 @@ func (p *partitionProducer) grabCnx() error {
 	p.cnx = res.Cnx
 	if err := p.cnx.RegisterListener(p.producerID, p); err != nil {
 		p.ConnectionClosed()
+		p.log.WithError(err).Error("Failed to register listener")
 	}
 	p.log.WithField("cnx", res.Cnx.ID()).Debug("Connected producer")
 
