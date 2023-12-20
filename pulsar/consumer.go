@@ -323,4 +323,6 @@ type Consumer interface {
 
 	// Name returns the name of consumer.
 	Name() string
+
+	GetLastMessageID(topicName string, partitionId int64) (MessageID, error)
 }

@@ -282,3 +282,12 @@ func (c *multiTopicConsumer) SeekByTime(time time.Time) error {
 func (c *multiTopicConsumer) Name() string {
 	return c.consumerName
 }
+
+func (c *multiTopicConsumer) GetLastMessageID(topicName string, partitionId int64) (MessageID, error) {
+	consumer, ok := c.consumers[topicName]
+	if !ok {
+		return nil, newError(InvalidTopicName, fmt.Sprintf("unable find topic=%s", topicName))
+	}
+
+	return consumer.GetLastMessageID(topicName, partitionId)
+}

@@ -48,6 +48,7 @@ const (
 	consumerReady
 	consumerClosing
 	consumerClosed
+	consumerUnsubscribed
 )
 
 func (s consumerState) String() string {
@@ -161,6 +162,7 @@ type partitionConsumer struct {
 	connectClosedCh chan connectionClosed
 	closeCh         chan struct{}
 	clearQueueCh    chan func(id *trackingMessageID)
+	reconnectCh     chan error
 
 	nackTracker *negativeAcksTracker
 	dlq         *dlqRouter
@@ -563,7 +565,7 @@ func (pc *partitionConsumer) internalUnsubscribe(unsub *unsubscribeRequest) {
 		pc.nackTracker.Close()
 	}
 	pc.log.Infof("The consumer[%d] successfully unsubscribed", pc.consumerID)
-	pc.setConsumerState(consumerClosed)
+	pc.setConsumerState(consumerUnsubscribed)
 }
 
 func (pc *partitionConsumer) getLastMessageID() (*trackingMessageID, error) {
@@ -787,7 +789,8 @@ func (pc *partitionConsumer) setConsumerState(state consumerState) {
 
 func (pc *partitionConsumer) Close() {
 
-	if pc.getConsumerState() != consumerReady {
+	if pc.getConsumerState() != consumerReady && pc.getConsumerState() != consumerUnsubscribed {
+		pc.log.Info("Close skip due to not ready")
 		return
 	}
 
@@ -825,6 +828,8 @@ func (pc *partitionConsumer) Seek(msgID MessageID) error {
 		req.msgID = tmid.messageID
 	}
 
+	// it safe to change channel value here, since only one event is processed
+	pc.reconnectCh = make(chan error, 1)
 	pc.ackGroupingTracker.flushAndClean()
 	pc.eventsCh <- req
 
@@ -1565,7 +1570,7 @@ func (pc *partitionConsumer) runEventsLoop() {
 func (pc *partitionConsumer) internalClose(req *closeRequest) {
 	defer close(req.doneCh)
 	state := pc.getConsumerState()
-	if state != consumerReady {
+	if state != consumerReady && state != consumerUnsubscribed {
 		// this might be redundant but to ensure nack tracker is closed
 		if pc.nackTracker != nil {
 			pc.nackTracker.Close()
@@ -1648,6 +1653,12 @@ func (pc *partitionConsumer) reconnectToBroker() {
 		if err == nil {
 			// Successfully reconnected
 			pc.log.Info("Reconnected consumer to broker")
+			select {
+			case pc.reconnectCh <- nil:
+				// send signal to seek request
+			default:
+				// no waiting seek
+			}
 			return
 		}
 		pc.log.WithError(err).Error("Failed to create consumer at reconnect")
@@ -1665,6 +1676,11 @@ func (pc *partitionConsumer) reconnectToBroker() {
 		if maxRetry == 0 || defaultBackoff.IsMaxBackoffReached() {
 			pc.metrics.ConsumersReconnectMaxRetry.Inc()
 		}
+	}
+	// try to notify waiting seek max retry exceeded
+	select {
+	case pc.reconnectCh <- newError(ConnectError, "reconnect to broker failed"):
+	default:
 	}
 }
 
